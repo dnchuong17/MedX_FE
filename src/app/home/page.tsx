@@ -19,7 +19,7 @@ import {
   MessageCircle,
   File,
   Search,
-  Sparkles,
+  Sparkles, Users,
 } from "lucide-react"
 import { FaUserCircle } from "react-icons/fa"
 import { motion, AnimatePresence } from "framer-motion"
@@ -691,9 +691,9 @@ const HomePage = () => {
                 icon: <MessageCircle className="h-5 w-5 text-gray-600" />,
               },
               {
-                href: "/health-record",
-                label: "Health Record",
-                icon: <File className="h-5 w-5 text-gray-600" />,
+                href: "/community",
+                label: "Community",
+                icon: <Users className="h-5 w-5 text-gray-600" />,
               },
             ].map((item) => (
               <motion.div
