@@ -10,9 +10,11 @@ import AddButton from "@/components/health-record/add.button";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import "@solana/wallet-adapter-react-ui/styles.css";
+import DecryptedRecordModal from "@/components/modals/unsigned-template/index";
+import ModalPortal from "@/components/modals/unsigned-template/ModalPortal";
 
 
-import { getUserRecord } from "@/utils/api";
+import {getCurrentUser, getUserRecord, getUnsignedRecord} from "@/utils/api";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 import { createHash } from "crypto";
@@ -30,6 +32,7 @@ export interface UserRecord {
     notes: string;
     encryptedData: string;
     fileName: string;
+    recordId?: string;
 }
 
 
@@ -44,6 +47,7 @@ interface UIRecord {
     notes?: string;
     encryptedData?: string;
     fileName: string;
+    recordId?: string;
 }
 
 
@@ -68,7 +72,11 @@ export default function HealthRecordsApp() {
     const [successMessage, setSuccessMessage] = useState<string | null>(null);
     const [authError, setAuthError] = useState<string | null>(null);
     const [curvePublicKey, setCurvePublicKey] = useState<Uint8Array | null>(null);
+    const [decryptedJsonData, setDecryptedJsonData] = useState<any | null>(null);
 
+    const [recordAuthenticating, setRecordAuthenticating] = useState<string | null>(null);
+    const [authenticatedRecords, setAuthenticatedRecords] = useState<Set<string>>(new Set());
+    const [unsignedRecordId, setUnsignedRecordId] = useState<string | null>(null);
 
     const authenticateUser = async () => {
         if (!connected || !publicKey || !signMessage) {
@@ -121,23 +129,120 @@ export default function HealthRecordsApp() {
             setIsAuthenticating(false);
         }
     };
+    const authenticateUserForRecord = async (recordId: string) => {
+        if (!connected || !publicKey || !signMessage) {
+            setAuthError("Wallet not connected or doesn't support message signing.");
+            return false;
+        }
+
+        try {
+            setRecordAuthenticating(recordId);
+            setAuthError(null);
 
 
-    const transformRecords = (apiRecords: UserRecord[]): UIRecord[] => {
-        return apiRecords.map((record, index) => ({
-            id: index + 1,
-            title: record.category || "Health Record",
-            date: record.date ? formatDate(record.date) : "N/A",
-            doctor: record.doctor,
-            type: record.category || "General",
-            location: record.facility || "Unknown",
-            status: record.versionOf ? "Updated" : "Shared",
-            url: record.url,
-            notes: record.notes,
-            encryptedData: record.encryptedData,
-            fileName: record.fileName,
-        }));
+            const currentUser = await getCurrentUser();
+            const userId = currentUser.id;
+
+            const unsignedRecordData = await getUnsignedRecord(userId);
+
+            console.log("Record ID:", unsignedRecordData.recordId);
+            console.log("Transaction:", unsignedRecordData.transaction);
+
+
+            const message = `Authenticate health record access`;
+            const messageBytes = new TextEncoder().encode(message);
+            const messageSignature = await signMessage(messageBytes);
+            const signatureBase58 = bs58.encode(messageSignature);
+
+            const isValid = nacl.sign.detached.verify(
+                messageBytes,
+                messageSignature,
+                publicKey.toBytes()
+            );
+
+            if (isValid) {
+                await sodium.ready;
+                const derivedSeed = createHash("sha256").update(messageSignature).digest();
+                const keypair = nacl.sign.keyPair.fromSeed(new Uint8Array(derivedSeed));
+
+                const curvePrivKey = sodium.crypto_sign_ed25519_sk_to_curve25519(keypair.secretKey);
+                const curvePubKey = sodium.crypto_sign_ed25519_pk_to_curve25519(keypair.publicKey);
+
+                setCurvePrivateKey(curvePrivKey);
+                setCurvePublicKey(curvePubKey);
+                setSignature(signatureBase58);
+
+                setAuthenticatedRecords(prev => new Set([...prev, recordId]));
+
+                setSuccessMessage(`Record ${recordId} authenticated and signed successfully!`);
+                setTimeout(() => setSuccessMessage(null), 3000);
+
+                console.log(`Record ${recordId} signed with signature:`, signatureBase58);
+
+
+                return true;
+            } else {
+                setAuthError("Signature verification failed for record.");
+                return false;
+            }
+        } catch (err) {
+            console.error("Record authentication error:", err);
+            setAuthError(`Failed to authenticate record ${recordId}. Please try again.`);
+            return false;
+        } finally {
+            setRecordAuthenticating(null);
+        }
     };
+
+    const signAndDecryptUnsignedRecord = async () => {
+        try {
+            setLoading(true);
+            const currentUser = await getCurrentUser();
+            const userId = currentUser.id;
+
+            const { recordId } = await getUnsignedRecord(userId);
+            console.log("Unsigned Record ID:", recordId);
+
+            const success = await authenticateUserForRecord(recordId);
+
+            if (success) {
+                const record = allRecords.find(r => r.recordId === recordId);
+                if (record) {
+                    await openRecord(record);
+                } else {
+                    setAuthError("Authenticated, but record not found in your record list.");
+                    console.error("Record not found in local list.");
+                }
+            }
+        } catch (err) {
+            console.error("Error signing and decrypting unsigned record:", err);
+            setAuthError("Failed to authenticate and decrypt the record.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const transformRecords = (apiRecords: UserRecord[], unsignedId: string | null): UIRecord[] => {
+        return apiRecords.map((record, index) => {
+            const isUnsign = unsignedId && record.recordId === unsignedId;
+            return {
+                id: index + 1,
+                title: record.category || "Health Record",
+                date: record.date ? formatDate(record.date) : "N/A",
+                doctor: record.doctor,
+                type: record.category || "General",
+                location: record.facility || "Unknown",
+                status: isUnsign ? "Unsign" : (record.versionOf ? "Updated" : "Shared"),
+                url: record.url,
+                notes: record.notes,
+                encryptedData: record.encryptedData,
+                fileName: record.fileName,
+                recordId: record.recordId,
+            };
+        });
+    };
+
+
 
 
     const formatDate = (dateString: string): string => {
@@ -167,7 +272,45 @@ export default function HealthRecordsApp() {
     };
 
 
+    // const fetchUnsignedRecordFromAPI = async () => {
+    //     try {
+    //         setLoading(true);
+    //         setError(null);
+    //
+    //         const currentUser = await getCurrentUser();
+    //         const userId = currentUser.id;
+    //
+    //         console.log("Current User ID:", userId);
+    //
+    //         // Gọi API thực sự
+    //         const apiUnsignedRecord = await getUnsignedRecord(userId);
+    //
+    //         console.log("✅ Record ID:", apiUnsignedRecord.recordId);
+    //         console.log("✅ Transaction:", apiUnsignedRecord.transaction);
+    //
+    //         return apiUnsignedRecord;
+    //
+    //     } catch (error: any) {
+    //         console.error('❌ Error in fetchUnsignedRecordFromAPI:', error);
+    //         setError(error.message || 'Failed to fetch unsigned record');
+    //         throw error;
+    //     } finally {
+    //         setLoading(false);
+    //     }
+    // };
+
+
     const openRecord = async (record: UIRecord & { encryptedData?: string }) => {
+        if (record.recordId && !authenticatedRecords.has(record.recordId) && !isAuthenticated) {
+            setAuthError(`Please authenticate record ${record.recordId} first to decrypt and view this health record.`);
+            return;
+        }
+
+        if (!isAuthenticated && !record.recordId) {
+            setAuthError("Please authenticate first to decrypt and view your health records.");
+            return;
+        }
+
         if (!isAuthenticated || !curvePrivateKey || !curvePublicKey) {
             setAuthError("Please authenticate first to decrypt and view your health records.");
             return;
@@ -180,8 +323,8 @@ export default function HealthRecordsApp() {
             if (record.encryptedData) {
                 await sodium.ready;
                 const cleaned = record.encryptedData.replace(/[\s\n\r]+/g, "").trim();
-                let encrypted: Uint8Array;
 
+                let encrypted: Uint8Array;
                 try {
                     encrypted = sodium.from_base64(cleaned, sodium.base64_variants.ORIGINAL);
                 } catch (err) {
@@ -196,6 +339,7 @@ export default function HealthRecordsApp() {
                 );
 
                 if (!decryptedData) throw new Error("Decryption failed.");
+
                 const mimeType = record.fileName?.endsWith(".pdf")
                     ? "application/pdf"
                     : record.fileName?.endsWith(".json")
@@ -206,6 +350,20 @@ export default function HealthRecordsApp() {
                                 ? "image/jpeg"
                                 : "application/octet-stream";
 
+                // ✅ Handle JSON directly here
+                if (mimeType === "application/json") {
+                    const jsonText = new TextDecoder().decode(decryptedData);
+                    try {
+                        const parsed = JSON.parse(jsonText);
+                        setDecryptedJsonData(parsed); // 👈 Show JSON on current page
+                        return; // ⛔ Stop here – don't open new tab
+                    } catch (err) {
+                        console.error("Failed to parse JSON:", err);
+                        throw new Error("Decrypted file is not valid JSON.");
+                    }
+                }
+
+                // ✅ Create Blob only for file types to preview
                 decryptedBlob = new Blob([decryptedData], { type: mimeType });
             }
 
@@ -215,13 +373,13 @@ export default function HealthRecordsApp() {
                 if (newWindow) {
                     if (decryptedBlob.type.startsWith('image/')) {
                         newWindow.document.write(`
-                        <html>
-                            <head><title>Health Record - ${record.title}</title></head>
-                            <body style="margin:0; display:flex; justify-content:center; align-items:center; min-height:100vh; background:#f5f5f5;">
-                                <img src="${decryptedUrl}" style="max-width:100%; max-height:100%; object-fit:contain;" />
-                            </body>
-                        </html>
-                    `);
+                    <html>
+                        <head><title>Health Record - ${record.title}</title></head>
+                        <body style="margin:0; display:flex; justify-content:center; align-items:center; min-height:100vh; background:#f5f5f5;">
+                            <img src="${decryptedUrl}" style="max-width:100%; max-height:100%; object-fit:contain;" />
+                        </body>
+                    </html>
+                `);
                     } else {
                         newWindow.location.href = decryptedUrl;
                     }
@@ -242,6 +400,7 @@ export default function HealthRecordsApp() {
             setLoading(false);
         }
     };
+
 
     const toggleDropdown = (type: string) => {
         setOpenDropdown(openDropdown === type ? null : type);
@@ -292,11 +451,48 @@ export default function HealthRecordsApp() {
         return categories.filter(Boolean);
     };
 
-
     useEffect(() => {
-        fetchUserRecords();
-    }, []);
+        const loadRecords = async () => {
+            try {
+                setLoading(true);
+                const currentUser = await getCurrentUser();
+                const userId = currentUser.id;
 
+                const [records, unsigned] = await Promise.all([
+                    getUserRecord(),
+                    getUnsignedRecord(userId)
+                ]);
+
+                setUnsignedRecordId(unsigned.recordId);
+                const transformedRecords = records.map((record, index) => {
+                    const isUnsign = record.recordId === unsigned.recordId;
+                    return {
+                        id: index + 1,
+                        title: record.category || "Health Record",
+                        date: record.date ? formatDate(record.date) : "N/A",
+                        doctor: record.doctor,
+                        type: record.category || "General",
+                        location: record.facility || "Unknown",
+                        status: isUnsign ? "Unsign" : (record.versionOf ? "Updated" : "Shared"),
+                        url: record.url,
+                        notes: record.notes,
+                        encryptedData: record.encryptedData,
+                        fileName: record.fileName,
+                        recordId: record.recordId,
+                    };
+                });
+
+                setAllRecords(transformedRecords);
+            } catch (err) {
+                console.error("Error loading records or unsigned:", err);
+                setError("Failed to load user records.");
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        loadRecords();
+    }, []);
 
     useEffect(() => {
         let filtered = [...allRecords];
@@ -337,7 +533,7 @@ export default function HealthRecordsApp() {
     }, [filterOption, sortOption, allRecords]);
 
 
-    if (loading && !isAuthenticating) {
+    if (loading && !isAuthenticating && !recordAuthenticating) {
         return (
             <div className="min-h-screen flex justify-center items-center p-4">
                 <div className="text-center">
@@ -365,6 +561,13 @@ export default function HealthRecordsApp() {
                             <div className="space-y-2">
                                 <p className="text-sm text-indigo-600">Connect your wallet to decrypt health records</p>
                                 <WalletMultiButton className="w-full"/>
+                                <button
+                                    onClick={signAndDecryptUnsignedRecord}
+                                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2 px-4 rounded-lg text-sm font-medium mt-2"
+                                >
+                                    🔐 Sign & Open the record
+                                </button>
+
                             </div>
                         ) : (
                             <div className="space-y-2">
@@ -550,6 +753,7 @@ export default function HealthRecordsApp() {
                 <div className="px-4 py-4 space-y-4">
                     {filteredRecords.length > 0 ? (
                         filteredRecords.map((record) => (
+
                             <div
                                 key={record.id}
                                 className={`border border-gray-200 rounded-xl p-3 flex items-center shadow-sm transition-shadow ${
@@ -580,12 +784,43 @@ export default function HealthRecordsApp() {
                                             {record.status}
                                         </div>
                                     )}
-                                    {!isAuthenticated && (
-                                        <div
-                                            className="mt-1 px-3 py-1 rounded-full text-xs inline-block bg-red-100 text-red-700">
-                                            🔒 Encrypted - Authentication Required
-                                        </div>
+
+                                    {record.status === "Unsign" && record.recordId === unsignedRecordId && (
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                authenticateUserForRecord(record.recordId!);
+                                            }}
+                                            className="mt-2 bg-orange-500 hover:bg-orange-600 text-white text-xs px-3 py-1 rounded-full"
+                                        >
+                                            🔐 Authentication & Decrypt
+                                        </button>
                                     )}
+
+
+
+
+                                    {/*{!isAuthenticated && (*/}
+                                    {/*    <div*/}
+                                    {/*        className="mt-1 px-3 py-1 rounded-full text-xs inline-block bg-red-100 text-red-700">*/}
+                                    {/*        🔒 Encrypted - Authentication Required*/}
+                                    {/*    </div>*/}
+                                    {/*)}*/}
+                                    {/*{requiresRecordAuth && (*/}
+                                    {/*    <div className="mt-1 px-3 py-1 rounded-full text-xs inline-block bg-orange-100 text-orange-700">*/}
+                                    {/*        🔐 Requires Record Authentication*/}
+                                    {/*    </div>*/}
+                                    {/*)}*/}
+                                    {/*{authStatus === 'requires_general_auth' && (*/}
+                                    {/*    <div className="mt-1 px-3 py-1 rounded-full text-xs inline-block bg-red-100 text-red-700">*/}
+                                    {/*        🔒 Requires General Authentication*/}
+                                    {/*    </div>*/}
+                                    {/*)}*/}
+                                    {/*{isRecordAuthenticated && (*/}
+                                    {/*    <div className="mt-1 px-3 py-1 rounded-full text-xs inline-block bg-green-100 text-green-700">*/}
+                                    {/*        ✅ Authenticated - Ready to decrypt*/}
+                                    {/*    </div>*/}
+                                    {/*)}*/}
                                 </div>
                                 <div
                                     onClick={(e) => {
@@ -639,6 +874,17 @@ export default function HealthRecordsApp() {
                 </div>
                 <BottomNavigation/>
             </div>
+            {decryptedJsonData && (
+                <ModalPortal>
+                    <DecryptedRecordModal
+                        data={decryptedJsonData}
+                        onClose={() => setDecryptedJsonData(null)}
+                    />
+                </ModalPortal>
+            )}
+
+
+
         </div>
     );
 }

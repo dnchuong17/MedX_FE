@@ -560,6 +560,9 @@ export interface UserRecord {
   facility: string
   date: string
   notes: string
+  encryptedData: string
+  fileName: string
+  recordId: string
 }
 
 export async function getUserRecord(): Promise<UserRecord[]> {
@@ -743,6 +746,7 @@ export async function deleteHealthNews(id: number): Promise<void> {
     throw error
   }
 }
+
 
 
 export async function getUnsignedRecord(userId: number): Promise<UnsignedRecordResponse> {
